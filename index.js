@@ -29,6 +29,7 @@ import {
   sessionNeedsRefresh,
   upsertWorkBuddySession,
 } from "./workbuddy-auth.js";
+import { probeEndpoint } from "./workbuddy-discovery.js";
 import { installWorkBuddyWeb } from "./workbuddy-web.js";
 
 export { Config };
@@ -841,7 +842,12 @@ export function apply(ctx, config) {
       }));
     }
     const provider = builtins.get(request.provider);
-    if (!provider) throw new LlmError(`没有 Provider "${request.provider ?? ""}" 的模型目录`, "DISCOVERY_FAILED");
+    // A hand-declared gateway is neither a WorkBuddy route nor an installed
+    // pi-ai provider, yet `genericProvider()` already registers it as a route
+    // and `directoryEntries()` already offers it on the Models page. Its
+    // models can only come from its endpoint, which is what the built-in
+    // `llm-pi-ai` plugin answers for the same routes.
+    if (!provider) return probeEndpoint(request, { profiles, resolveCredential });
     return provider.getModels().map((model) => ({
       id: model.id,
       name: model.name,
