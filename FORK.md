@@ -61,12 +61,27 @@ if (!provider) return probeEndpoint(request, { profiles, resolveCredential });
 ```bash
 node sync-to-dsh.mjs            # 同步到 profile 里已安装的包
 node sync-to-dsh.mjs --check    # 只看差异
-node sync-to-dsh.mjs --restore  # 从备份还原
+node sync-to-dsh.mjs --restore  # 还原（移除新增模块并恢复备份）
 ```
 
 用同步而不是把 profile 的依赖改成 `link:`，是因为后者要跑 `pnpm install`，
 会一并重新解析 profile 的其他依赖（`dshmarket`、`@linxin666/dsh-remote-web-ui` 等），
-可能顺带升级它们。这个脚本只覆盖本包自己的文件，不碰 lockfile。
+可能顺带升级它们。这个脚本只动本包自己的文件，不碰 lockfile。
+
+> [!WARNING]
+> **必须「先删后拷」，不能直接 `copyFileSync` 覆盖。**
+>
+> pnpm 用**硬链接**从内容寻址存储铺文件到 `node_modules`。`index.js` 因此同时与
+> pnpm store 里的 blob、以及**其他 profile**（如 `desktop`）的同名文件**共享同一个
+> inode**。`copyFileSync` 是原地覆写，会顺着硬链接写穿，后果有两个：
+>
+> 1. pnpm store 的 blob 内容不再等于它的内容哈希——存储被污染，影响这台机器上
+>    **所有**使用该版本的安装；
+> 2. 其他 profile 的副本被一并改掉，而它们**没有** `workbuddy-discovery.js`，
+>    于是那些 profile 直接坏掉。
+>
+> 脚本用 `rmSync` + `copyFileSync` 断开链接，复制落在新 inode 上。
+> 同步后可用 `fsutil hardlink list <包目录>\index.js` 复核：只应列出它自己一条路径。
 
 **同步后需要重启 dsh**（宿主侧模块只在启动时加载），再刷新页面。
 
