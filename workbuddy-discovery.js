@@ -1,0 +1,309 @@
+/**
+ * Endpoint model discovery for provider routes this plugin does not describe.
+ *
+ * ## Why this exists
+ *
+ * The plugin disables the built-in `llm-pi-ai` plugin (see `cordis.patch.yml`)
+ * and reuses its settings namespace, `Config`, and `PiAiAdapter` to serve every
+ * route under `providers.<route>`. That reuse is deliberate and works: a
+ * hand-declared gateway is accepted by `genericProvider()`, registered as an
+ * adapter route, and listed as a `declared` entry on the Models page.
+ *
+ * Model discovery is the one part that did not come along. `LlmRuntime`
+ * registers discovery per settings namespace, so this plugin is the only
+ * responder for `llm-pi-ai`, and its handler recognised exactly two kinds of
+ * route: its own WorkBuddy routes, and the installed `@earendil-works/pi-ai`
+ * providers. A hand-declared gateway is neither, so "Fetch available models"
+ * answered `没有 Provider "…" 的模型目录` for a route the Models page had just
+ * offered to configure.
+ *
+ * The built-in `llm-pi-ai` plugin answers those routes by interrogating the
+ * endpoint, so this module restores that answer. It follows the same rules DSH
+ * documents for its own interrogation: the same listing URLs, the same
+ * authentication headers, the same accepted response shapes and capacity
+ * spellings, and the same response-size ceiling.
+ *
+ * Only routes that are neither WorkBuddy nor installed providers reach this
+ * code, so it never consults an installed catalog — there is none to consult.
+ *
+ * @module workbuddy-discovery
+ */
+import { LlmError } from "@deepseek-ai/dsh-llm";
+
+/**
+ * Protocols whose model listing this module can read.
+ *
+ * OpenAI protocols use bearer auth at `GET {baseURL}/models`; Anthropic
+ * Messages uses `x-api-key` and `anthropic-version` at its native
+ * `GET /v1/models`. Azure (an `api-key` header plus an `api-version` query) and
+ * Codex (OAuth) are deliberately absent: guessing their conventions would
+ * report an authentication failure as a provider that lists no models.
+ */
+const LISTABLE_PROTOCOLS = new Set([
+  "anthropic-messages",
+  "openai-completions",
+  "openai-responses",
+]);
+
+/** Stable API version required by Anthropic's model-listing endpoint. */
+const ANTHROPIC_VERSION = "2023-06-01";
+
+/** Largest page Anthropic's public endpoint accepts; one page is read, `has_more` is not followed. */
+const ANTHROPIC_MODEL_LIMIT = 1000;
+
+/**
+ * Response ceiling. The endpoint is a URL the user typed, so the bound is
+ * applied to the bytes actually read rather than to a length the server
+ * claims. A truncated model listing is not parseable, so overflow rejects.
+ */
+const MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
+
+/**
+ * Join the endpoint base with the protocol's listing path.
+ *
+ * The base is treated as a prefix rather than a URL to resolve against, so a
+ * deployment path such as `https://gateway.example/openai/v1` keeps its
+ * segments instead of losing them to `URL` resolution. Only this listing URL
+ * normalizes a trailing `/v1` for Anthropic; model requests keep the
+ * configured `baseURL` unchanged.
+ * @param {string} baseURL - endpoint the request was drafted against.
+ * @param {string} api - wire protocol the draft named.
+ * @returns {string} listing URL to interrogate.
+ */
+function listingUrl(baseURL, api) {
+  const base = baseURL.replace(/\/+$/, "");
+  if (api !== "anthropic-messages") return `${base}/models`;
+  const root = base.endsWith("/v1") ? base.slice(0, -3) : base;
+  return `${root}/v1/models?limit=${String(ANTHROPIC_MODEL_LIMIT)}`;
+}
+
+/**
+ * First usable positive-integer capacity among the candidate fields.
+ * @param {...unknown} candidates - values a listing may carry a capacity in.
+ * @returns {number|undefined} the capacity, or undefined when none is usable.
+ */
+function capacity(...candidates) {
+  for (const candidate of candidates) {
+    if (typeof candidate === "number" && Number.isInteger(candidate) && candidate > 0) return candidate;
+  }
+  return undefined;
+}
+
+/**
+ * First non-empty string among the candidate fields.
+ * @param {...unknown} candidates - values a listing may carry a label in.
+ * @returns {string|undefined} the label, or undefined when none is usable.
+ */
+function label(...candidates) {
+  for (const candidate of candidates) {
+    if (typeof candidate === "string" && candidate.length > 0) return candidate;
+  }
+  return undefined;
+}
+
+/**
+ * Read one model-listing reply.
+ *
+ * The standard `data` array wins when both supported shapes are present. An
+ * enriched `models` map uses each property key as the request id, because a
+ * gateway may put a canonical identity in the nested `id` instead of the alias
+ * it accepts on requests; the nested value is only a fallback for an empty key.
+ * Primitive-valued map properties are ignored — they may be directory
+ * metadata rather than model records.
+ *
+ * An entry without a usable id is skipped rather than failing the whole
+ * interrogation: one malformed row should not deny the user the rest of a
+ * working endpoint's catalog.
+ * @param {unknown} body - parsed JSON reply.
+ * @returns {Array<{id: string, name: string, contextWindow?: number, maxTokens?: number}>} candidates in endpoint order.
+ * @throws {LlmError} when the reply is not a model listing this module reads.
+ */
+function readListing(body) {
+  const listing = /** @type {{ data?: unknown, models?: unknown } | null} */ (body);
+  const data = listing?.data;
+  let listed;
+  if (Array.isArray(data)) {
+    listed = data.map((raw) => ({ raw }));
+  } else {
+    const models = listing?.models;
+    if (models === null || typeof models !== "object" || Array.isArray(models)) {
+      throw new LlmError(
+        "端点的模型列表既没有 \"data\" 数组也没有 \"models\" 对象；请手动添加该 Provider 的模型",
+        "DISCOVERY_FAILED",
+      );
+    }
+    listed = Object.entries(models)
+      .filter(([, raw]) => raw !== null && typeof raw === "object" && !Array.isArray(raw))
+      .map(([key, raw]) => ({ key, raw }));
+  }
+  const found = [];
+  for (const { key, raw } of listed) {
+    const entry = raw;
+    const id = label(key, entry?.id);
+    if (id === undefined) continue;
+    const name = label(entry?.name, entry?.display_name, entry?.displayName) ?? id;
+    const contextWindow = capacity(
+      entry?.contextWindow,
+      entry?.context_window,
+      entry?.context_length,
+      entry?.max_input_tokens,
+      entry?.limit?.context,
+    );
+    const maxTokens = capacity(
+      entry?.maxOutputTokens,
+      entry?.max_output_tokens,
+      entry?.maxTokens,
+      entry?.max_tokens,
+      entry?.limit?.output,
+      entry?.top_provider?.max_completion_tokens,
+    );
+    found.push({
+      id,
+      name,
+      ...contextWindow === undefined ? {} : { contextWindow },
+      ...maxTokens === undefined ? {} : { maxTokens },
+    });
+  }
+  return found;
+}
+
+/**
+ * Read a reply body under the ceiling.
+ *
+ * A declared `content-length` is checked first so an honest server is turned
+ * away without transferring anything, but the accumulated total is what
+ * enforces the bound: a server that under-declares or streams tells us nothing
+ * up front.
+ * @param {Response} response - the 2xx response to read.
+ * @param {string} url - URL named in the failure.
+ * @returns {Promise<string>} the decoded body.
+ * @throws {LlmError} when the body exceeds the ceiling.
+ */
+async function readBounded(response, url) {
+  const oversized = () => new LlmError(
+    `${url} 返回了超过 ${String(MAX_RESPONSE_BYTES)} 字节`,
+    "DISCOVERY_FAILED",
+  );
+  const declared = Number(response.headers.get("content-length") ?? Number.NaN);
+  if (Number.isFinite(declared) && declared > MAX_RESPONSE_BYTES) {
+    await response.body?.cancel();
+    throw oversized();
+  }
+  if (response.body === null) return "";
+  const reader = response.body.getReader();
+  const chunks = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > MAX_RESPONSE_BYTES) throw oversized();
+      chunks.push(value);
+    }
+  } finally {
+    // Cancel after a drained read, or after walking away from an oversized
+    // one; the reply is already decided either way.
+    await reader.cancel().catch(() => {});
+  }
+  const merged = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    merged.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(merged);
+}
+
+/**
+ * Interrogate a provider endpoint for the models it advertises.
+ *
+ * Called only for a draft this plugin does not otherwise describe, so an
+ * installed catalog is never consulted. A draft naming no endpoint throws the
+ * diagnostic the caller previously produced for every unknown route.
+ * @param {{ provider?: string, baseURL?: string, api?: string, apiKey?: string, signal?: AbortSignal }} request - the draft a configuration surface is editing.
+ * @param {{ profiles: () => Map<string, any>, resolveCredential: (provider: string, profile: any) => Promise<{ value?: string }> }} deps - this plugin's own profile lookup and credential resolver, used to supply what a draft cannot carry.
+ * @returns {Promise<Array<{id: string, name: string, contextWindow?: number, maxTokens?: number}>>} advertised models in endpoint order.
+ * @throws {LlmError} when there is nothing to ask, the protocol has no readable listing, the endpoint refuses or fails the request, or the reply is not a model listing.
+ */
+export async function probeEndpoint(request, deps) {
+  const baseURL = typeof request.baseURL === "string" ? request.baseURL : "";
+  if (baseURL.length === 0) {
+    throw new LlmError(
+      `没有 Provider "${request.provider ?? ""}" 的模型目录`,
+      "DISCOVERY_FAILED",
+    );
+  }
+  // A draft that has not chosen a protocol is asked as OpenAI Chat
+  // Completions: it is the shape a gateway is overwhelmingly likely to speak,
+  // and refusing until the field is filled would withhold the action from the
+  // case it exists for.
+  const api = request.api ?? "openai-completions";
+  if (!LISTABLE_PROTOCOLS.has(api)) {
+    throw new LlmError(
+      `pi-ai 协议 "${api}" 没有本插件能读取的模型列表；请手动添加该 Provider 的模型`,
+      "DISCOVERY_UNSUPPORTED",
+    );
+  }
+  const url = listingUrl(baseURL, api);
+
+  // A key typed into the form wins: it may replace the stored key that is
+  // failing. The stored profile is only asked when the draft carries none, and
+  // only for a route that exists — a provider being added has no route to name.
+  let apiKey = typeof request.apiKey === "string" && request.apiKey.length > 0 ? request.apiKey : undefined;
+  let profileHeaders;
+  const profile = request.provider === undefined ? undefined : deps.profiles().get(request.provider);
+  if (profile !== undefined) {
+    profileHeaders = profile.headers;
+    if (apiKey === undefined) {
+      const resolved = await deps.resolveCredential(request.provider, profile);
+      if (typeof resolved?.value === "string" && resolved.value.length > 0) apiKey = resolved.value;
+    }
+  }
+
+  const headers = new Headers(profileHeaders === undefined ? undefined : Object.entries(profileHeaders));
+  headers.set("accept", "application/json");
+  if (api === "anthropic-messages") {
+    headers.set("anthropic-version", ANTHROPIC_VERSION);
+    if (apiKey !== undefined) headers.set("x-api-key", apiKey);
+  } else if (apiKey !== undefined) {
+    headers.set("authorization", `Bearer ${apiKey}`);
+  }
+
+  let response;
+  try {
+    response = await fetch(url, {
+      method: "GET",
+      headers,
+      ...request.signal === undefined ? {} : { signal: request.signal },
+    });
+  } catch (error) {
+    if (request.signal?.aborted) {
+      throw new LlmError("模型列表获取已取消", "ABORTED", { cause: error });
+    }
+    throw new LlmError(`无法连接 ${url}`, "DISCOVERY_FAILED", { cause: error });
+  }
+  if (!response.ok) {
+    throw new LlmError(
+      `${url} 返回 ${String(response.status)}${response.status === 401 || response.status === 403 ? "；请检查 API Key" : ""}`,
+      "DISCOVERY_FAILED",
+    );
+  }
+
+  let text;
+  try {
+    text = await readBounded(response, url);
+  } catch (error) {
+    if (request.signal?.aborted) {
+      throw new LlmError("模型列表获取已取消", "ABORTED", { cause: error });
+    }
+    throw error;
+  }
+  let body;
+  try {
+    body = JSON.parse(text);
+  } catch (error) {
+    throw new LlmError(`${url} 没有返回 JSON`, "DISCOVERY_FAILED", { cause: error });
+  }
+  return readListing(body);
+}
