@@ -23,6 +23,7 @@ import {
   upsertWorkBuddySession,
 } from "./workbuddy-auth.js";
 import { authenticationMode } from "./workbuddy-web.js";
+import { probeEndpoint } from "./workbuddy-discovery.js";
 import { __testing as creditsTesting, fetchWorkBuddyCredits } from "./workbuddy-credits.js";
 
 test("客户端兼容包装 Provider 并将 WorkBuddy 用量并入统计行", () => {
@@ -436,3 +437,177 @@ test("积分查询只接受受信任的 WorkBuddy billing 域名", () => {
     PackageEndTimeRangeEnd: "2127-08-31 09:08:07",
   });
 });
+
+/** A stand-in gateway answering one scripted reply; returns its base URL and recorded requests. */
+async function listingServer({ status = 200, body = "{}", declaredLength } = {}) {
+  const { createServer } = await import("node:http");
+  const requests = [];
+  const server = createServer((request, response) => {
+    requests.push({ url: request.url, headers: request.headers });
+    const payload = typeof body === "function" ? body(request) : body;
+    response.writeHead(status, {
+      "content-type": "application/json",
+      ...declaredLength === undefined ? {} : { "content-length": String(declaredLength) },
+    });
+    response.end(payload);
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address();
+  return {
+    url: `http://127.0.0.1:${port}`,
+    requests,
+    close: () => new Promise((resolve) => server.close(resolve)),
+  };
+}
+
+/** Dependencies `probeEndpoint()` receives from the plugin at its call site. */
+function probeDeps({ headers, credential } = {}) {
+  return {
+    profiles: () => new Map(credential === undefined ? [] : [["gateway", { headers, apiKeyEnv: "GATEWAY_API_KEY" }]]),
+    resolveCredential: async () => ({ value: credential }),
+  };
+}
+
+test("自定义 Provider 的模型列表改为询问其端点", async () => {
+  const server = await listingServer({
+    body: JSON.stringify({
+      data: [
+        { id: "acme-large", display_name: "Acme Large", context_length: 65_536, max_output_tokens: 4096 },
+        { id: "acme-camel", displayName: "Acme Camel", contextWindow: 131_072, maxOutputTokens: 8192 },
+        { id: "acme-legacy", max_tokens: 1024 },
+        { id: "acme-small" },
+      ],
+    }),
+  });
+  try {
+    const models = await probeEndpoint(
+      { provider: "gateway", baseURL: server.url, api: "openai-completions", apiKey: "probe-key" },
+      probeDeps(),
+    );
+
+    // Every capacity spelling DSH's own interrogation reads is read here too,
+    // and a row with no usable id is dropped rather than failing the reply.
+    assert.deepEqual(models, [
+      { id: "acme-large", name: "Acme Large", contextWindow: 65_536, maxTokens: 4096 },
+      { id: "acme-camel", name: "Acme Camel", contextWindow: 131_072, maxTokens: 8192 },
+      { id: "acme-legacy", name: "acme-legacy", maxTokens: 1024 },
+      { id: "acme-small", name: "acme-small" },
+    ]);
+    assert.equal(server.requests[0].url, "/models");
+    assert.equal(server.requests[0].headers.authorization, "Bearer probe-key");
+  } finally {
+    await server.close();
+  }
+});
+
+test("富信息 models 对象以属性键作为请求 id", async () => {
+  const server = await listingServer({
+    body: JSON.stringify({
+      models: {
+        "request-alias": { id: "canonical-id", name: "Aliased", context_length: 32_768 },
+        "plain-id": { name: "Plain" },
+        ignoredPrimitive: "not-a-model",
+      },
+    }),
+  });
+  try {
+    const models = await probeEndpoint({ baseURL: server.url, api: "openai-completions" }, probeDeps());
+    assert.deepEqual(models, [
+      { id: "request-alias", name: "Aliased", contextWindow: 32_768 },
+      { id: "plain-id", name: "Plain" },
+    ]);
+  } finally {
+    await server.close();
+  }
+});
+
+test("没有 baseURL 时保持原有诊断，未知协议拒绝询问", async () => {
+  await assert.rejects(
+    () => probeEndpoint({ provider: "gateway" }, probeDeps()),
+    /没有 Provider "gateway" 的模型目录/,
+  );
+  await assert.rejects(
+    () => probeEndpoint({ baseURL: "https://acme.test", api: "google-generative-ai" }, probeDeps()),
+    (error) => error.code === "DISCOVERY_UNSUPPORTED",
+  );
+});
+
+test("已存密钥与 profile headers 供询问使用，表单键入的密钥优先", async () => {
+  const withStored = await listingServer({ body: JSON.stringify({ data: [] }) });
+  try {
+    await probeEndpoint(
+      { provider: "gateway", baseURL: withStored.url, api: "openai-completions" },
+      probeDeps({ headers: { "x-deployment": "yes" }, credential: "stored-key" }),
+    );
+    assert.equal(withStored.requests[0].headers.authorization, "Bearer stored-key");
+    assert.equal(withStored.requests[0].headers["x-deployment"], "yes");
+  } finally {
+    await withStored.close();
+  }
+
+  // A key typed into the form must win without resolving the stored one, which
+  // is how a user replaces a key that is failing.
+  const withTyped = await listingServer({ body: JSON.stringify({ data: [] }) });
+  try {
+    await probeEndpoint(
+      { provider: "gateway", baseURL: withTyped.url, api: "openai-completions", apiKey: "typed-key" },
+      {
+        profiles: () => new Map([["gateway", { headers: { "x-deployment": "yes" } }]]),
+        resolveCredential: async () => { throw new Error("stored credential must not be resolved"); },
+      },
+    );
+    assert.equal(withTyped.requests[0].headers.authorization, "Bearer typed-key");
+  } finally {
+    await withTyped.close();
+  }
+});
+
+test("Anthropic 路由使用原生列表路径与认证头", async () => {
+  const server = await listingServer({ body: JSON.stringify({ data: [{ id: "claude-opus-5" }] }) });
+  try {
+    const models = await probeEndpoint(
+      { baseURL: `${server.url}/v1`, api: "anthropic-messages", apiKey: "anthropic-key" },
+      probeDeps(),
+    );
+    assert.deepEqual(models, [{ id: "claude-opus-5", name: "claude-opus-5" }]);
+    // The trailing /v1 is normalized for the listing URL only.
+    assert.equal(server.requests[0].url, "/v1/models?limit=1000");
+    assert.equal(server.requests[0].headers["x-api-key"], "anthropic-key");
+    assert.equal(server.requests[0].headers["anthropic-version"], "2023-06-01");
+  } finally {
+    await server.close();
+  }
+});
+
+test("端点拒绝与非列表响应给出可区分的失败", async () => {
+  const refused = await listingServer({ status: 401, body: "{}" });
+  try {
+    await assert.rejects(
+      () => probeEndpoint({ baseURL: refused.url, api: "openai-completions" }, probeDeps()),
+      /401；请检查 API Key/,
+    );
+  } finally {
+    await refused.close();
+  }
+
+  const notAListing = await listingServer({ body: JSON.stringify({ object: "list" }) });
+  try {
+    await assert.rejects(
+      () => probeEndpoint({ baseURL: notAListing.url, api: "openai-completions" }, probeDeps()),
+      /既没有 "data" 数组也没有 "models" 对象/,
+    );
+  } finally {
+    await notAListing.close();
+  }
+
+  const notJson = await listingServer({ body: "<html>nope</html>" });
+  try {
+    await assert.rejects(
+      () => probeEndpoint({ baseURL: notJson.url, api: "openai-completions" }, probeDeps()),
+      /没有返回 JSON/,
+    );
+  } finally {
+    await notJson.close();
+  }
+});
+
