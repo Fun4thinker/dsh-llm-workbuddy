@@ -493,10 +493,14 @@ function installSettingsCompat(ctx, ns, schema, entry, hooks) {
     return dshSettings.installSettingsSection(ctx, ns, schema, entry, hooks);
   }
   return ctx.inject(["settings"], (settingsCtx) => {
-    if (!settingsCtx.settings || typeof settingsCtx.settings.installSection !== "function") {
-      throw new Error(`${name}: DSH settings service does not provide installSection`);
+    if (settingsCtx.settings && typeof settingsCtx.settings.installSection === "function") {
+      return settingsCtx.settings.installSection(ctx, ns, schema, entry, hooks);
     }
-    return settingsCtx.settings.installSection(ctx, ns, schema, entry, hooks);
+    // dsh >= 0.1.7 removed installSection: the entry's own Config is the
+    // settings document now. Volatile fields already reach `apply` as live
+    // references, so a saved edit surfaces as a volatile update instead of
+    // a setSource call; rewire it into the onChange hook.
+    return ctx.on("loader/volatile-update", () => hooks.onChange());
   });
 }
 
@@ -504,7 +508,16 @@ export const __testing = Object.freeze({ authenticationHeaders, workBuddyApiKeyA
 
 export function apply(ctx, config) {
   installWorkBuddyWeb(ctx);
-  let current = () => config;
+  // dsh >= 0.1.7 hands volatile Config fields to apply as live references:
+  // unwrap the providers snapshot on every read while keeping the returned
+  // object identity stable between updates, so downstream memoization hits.
+  const ns = ctx.fiber?.entry?.options.id ?? NS;
+  const rawConfig = () => {
+    const providers = config?.providers;
+    const snapshot = typeof providers?.get === "function" ? providers.get() : providers;
+    return { ...config, providers: snapshot };
+  };
+  let current = rawConfig;
   const requestContext = new AsyncLocalStorage();
   let remoteModels;
   let generation = 0;
@@ -535,7 +548,7 @@ export function apply(ctx, config) {
     for (const [provider, source] of Object.entries(raw.providers)) {
       if (!ownsProvider(provider, builtins, source)) continue;
       if (WORKBUDDY_PROVIDERS.has(provider)) {
-        const sourceWithAuth = workBuddySource(current(), source);
+        const sourceWithAuth = workBuddySource(rawConfig(), source);
         const models = selectWorkBuddyModels(remoteModels ?? FALLBACK_MODELS, source.models);
         const configured = new Map((source.models ?? []).flatMap((model) =>
           Number.isSafeInteger(model.maxTokens) && model.maxTokens > 0 ? [[model.id, model.maxTokens]] : [],
@@ -802,13 +815,13 @@ export function apply(ctx, config) {
   const directoryEntries = () => [{
     provider: PROVIDER,
     displayName: DISPLAY_NAME,
-    settingsNs: NS,
+    settingsNs: ns,
     settingsPath: ["providers", PROVIDER],
     declared: false,
   }, ...[...builtins.values()].flatMap((provider) => provider.auth?.apiKey ? [{
     provider: provider.id,
     displayName: provider.name,
-    settingsNs: NS,
+    settingsNs: ns,
     settingsPath: ["providers", provider.id],
     declared: false,
   }] : []), ...Object.entries(effectiveConfig().providers ?? {}).flatMap(([provider, source]) => {
@@ -816,7 +829,7 @@ export function apply(ctx, config) {
     return [{
       provider,
       displayName: source.displayName ?? provider,
-      settingsNs: NS,
+      settingsNs: ns,
       settingsPath: ["providers", provider],
       declared: true,
     }];
@@ -825,7 +838,7 @@ export function apply(ctx, config) {
   let directory = ctx.llm.registerConfigurableProviders(directoryEntries());
   let registration = ctx.llm.registerAdapter([...profiles().keys()], adapter);
 
-  ctx.llm.registerModelDiscovery(NS, async (request) => {
+  ctx.llm.registerModelDiscovery(ns, async (request) => {
     if (WORKBUDDY_PROVIDERS.has(request.provider)) {
       const profile = profiles().get(request.provider);
       const credential = request.apiKey
@@ -857,14 +870,15 @@ export function apply(ctx, config) {
   });
 
   // Keep WorkBuddy out of the settings base layer so it appears in WebUI's
-  // "Add provider" dropdown. The runtime profile above still exists as the
-  // built-in implementation; selecting it only persists the credential ref.
-  installSettingsCompat(ctx, NS, Config, config ?? { providers: {} }, {
+  // "Add provider" dropdown. On dsh >= 0.1.7 the settings document IS this
+  // entry's volatile config, so edits replay through loader/volatile-update.
+  installSettingsCompat(ctx, ns, Config, config ?? { providers: {} }, {
     setSource(source) {
       current = source;
     },
     onChange() {
       memoRaw = undefined;
+      memoized = undefined;
       const providers = profiles();
       registration.replace([...providers.keys()]);
       directory.replace(directoryEntries());

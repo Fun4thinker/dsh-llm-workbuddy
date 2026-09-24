@@ -2,5 +2,5 @@
   disabled: true
 
 - insert:
-    - id: llm-workbuddy
+    - id: llm-pi-ai
       name: '@axiaohungry/dsh-llm-workbuddy'

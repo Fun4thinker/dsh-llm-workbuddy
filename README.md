@@ -1,8 +1,51 @@
-# DSH WorkBuddy Provider
+# DSH WorkBuddy Provider (Fork)
 
 为 DeepSeek Harness（DSH）增加 `WorkBuddy 中国区` Provider。插件通过
 WorkBuddy 提供的 API Key，或 WorkBuddy 中国站的网页登录令牌调用模型，并在
 DSH WebUI 中管理模型和认证方式。
+
+## 关于本 Fork
+
+本仓库是 [`@axiaohungry/dsh-llm-workbuddy`](https://github.com/Axiaohungry/dsh-llm-workbuddy)
+（[npm 包](https://www.npmjs.com/package/@axiaohungry/dsh-llm-workbuddy)）的 Fork。感谢原作者
+[Axiaohungry](https://github.com/Axiaohungry) 的工作。
+
+Fork 原因：DSH `0.1.7-alpha.2` 重构了设置系统（移除 `settings.yaml` 与 settings 服务的
+`installSection` / `get(ns)` API），导致原插件无法在 WebUI 中编辑模型配置（保存按钮置灰）、
+无法切换令牌登录。已向原作者提交 issue 说明，但暂未获得回复，也无法提交 PR，因此维护
+本 Fork 以先行支持新版 DSH。
+
+**本 Fork 相对上游的全部改动**（基于上游 `559e7fc`，均为对 DSH `0.1.7-alpha.2` 的兼容修复，
+不改变任何功能行为；旧版 DSH 用户无需切换）：
+
+1. **`cordis.patch.yml`** — 插件挂载方式从「禁用官方 `llm-pi-ai` + 插入 `llm-workbuddy` entry」
+   改为「以同名 id 直接接管 `llm-pi-ai` entry」。新版 DSH 的 Models 设置页硬编码只为
+   `llm-pi-ai` 命名空间渲染完整编辑表单，entry 换名会导致保存按钮永久置灰、API 密钥
+   输入框与令牌登录 UI 失去挂载点。
+2. **`index.js`** — 适配新版配置传递机制：volatile 配置字段现以活引用（`.get()`）传入
+   `apply()`，插件在每次读取时解包快照；settings 注册在 `installSection` 缺失时改走
+   entry 自身 Config + `loader/volatile-update` 事件；settings 命名空间解析为真实
+   entry id（`ctx.fiber.entry.options.id`）。
+3. **`workbuddy-web.js`** — 认证 Web 路由兼容 `settings.get(ns)` 的移除：在新版 DSH 上
+   用 `describe()` 结果自动补一个等价的 `get(ns)` shim，修复「切换到令牌登录」卡死在
+   “切换中…”的问题。
+
+**Fork 版本的安装方式**（通过 git link，不改 npm 包名）：
+
+```powershell
+# 在 DSH 的 web profile 中以本地路径安装
+dsh plugin --profile web add "link:<本仓库的本地克隆路径>"
+```
+
+或在 `~/.dsh/profiles/web/package.json` 中添加依赖后执行 `pnpm install`：
+
+```json
+{
+  "dependencies": {
+    "@axiaohungry/dsh-llm-workbuddy": "link:D:/path/to/dsh-llm-workbuddy"
+  }
+}
+```
 
 > [!IMPORTANT]
 > API Key 来自 **WorkBuddy**，用于调用供 WorkBuddy 使用的模型服务。本插件是第三方
@@ -34,6 +77,11 @@ DSH WebUI 中管理模型和认证方式。
 运行时副本，而是复用宿主 DSH 的运行时，避免更新 DSH 后出现 Provider 目录接口
 （`llm/listProviders`）不兼容。`1.3.10` 起，WorkBuddy 认证助手同时兼容新旧 DSH
 的 `signal` 调用约定。升级插件后请重新安装一次并重启 DSH。
+
+> [!NOTE]
+> **本 Fork 额外支持 DSH `0.1.7-alpha.2`**：该版本移除了 `settings.yaml` 与 settings
+> 服务的 `installSection` / `get(ns)` API，上游版本在其上无法保存模型配置、无法切换
+> 令牌登录（详见上方「关于本 Fork」）。Fork 改动同时保持对旧版 DSH 的兼容。
 
 ## 安装
 

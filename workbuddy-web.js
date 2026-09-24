@@ -272,6 +272,10 @@ async function resolveSession(webCtx, accountId, sessionId) {
 
 export function installWorkBuddyWeb(ctx) {
   ctx.inject(["webServer", "settings", "credentials"], (webCtx) => {
+    // dsh >= 0.1.7 removed settings.get(ns); describe() carries the live value.
+    if (typeof webCtx.settings.get !== "function" && typeof webCtx.settings.describe === "function") {
+      webCtx.settings.get = (ns) => webCtx.settings.describe().find((row) => row.ns === ns)?.value;
+    }
     let loginPromise;
     const currentState = async (requestedSessionId) => {
       const sessionId = sessionIdOf(requestedSessionId);
