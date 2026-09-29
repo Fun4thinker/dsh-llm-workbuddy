@@ -294,6 +294,35 @@ test("旧版接管 pi-ai，新版保留内置 pi-ai 供自定义 Provider 使用
   assert.equal(disabled(ctx, host("1.0.0")), false);
 });
 
+test("本机页面守卫同时接受浏览器页面与桌面端转发", () => {
+  // 桌面端（Electron）把页面请求转发到本地 Host 前会删掉 origin 与
+  // sec-fetch-site（apps/desktop/src/web-document.ts），因此桌面端的 POST 到达
+  // 插件时既没有 origin 也没有 sec-fetch-site。旧实现要求
+  // `sec-fetch-site === "same-origin"`，于是桌面端里积分、模型配置、API Key、
+  // 登录等全部 POST 路由一律 403。
+  const at = (address, headers) => webTesting.localPost({ socket: { remoteAddress: address }, headers });
+
+  // 桌面端转发后的真实形态：环回 + 无标记。
+  assert.equal(at("127.0.0.1", {}), true);
+  // 浏览器页面：环回来源或显式 same-origin 标记。
+  assert.equal(at("127.0.0.1", { origin: "http://127.0.0.1:19387" }), true);
+  assert.equal(at("127.0.0.1", { origin: "http://localhost:3080" }), true);
+  assert.equal(at("127.0.0.1", { "sec-fetch-site": "same-origin" }), true);
+  // 直连 Host 的桌面页面自身来源，以及 IPv6 映射的环回地址。
+  assert.equal(at("127.0.0.1", { origin: "dsh-app://app" }), true);
+  assert.equal(at("::ffff:127.0.0.1", {}), true);
+
+  // 跨站浏览器请求必须继续被拒；非环回地址一律拒绝。
+  assert.equal(at("127.0.0.1", { "sec-fetch-site": "cross-site" }), false);
+  assert.equal(at("127.0.0.1", { "sec-fetch-site": "cross-site", origin: "http://127.0.0.1:19387" }), false);
+  assert.equal(at("127.0.0.1", { origin: "http://evil.example" }), false);
+  assert.equal(at("127.0.0.1", { origin: "https://127.0.0.1.evil.example" }), false);
+  assert.equal(at("127.0.0.1", { origin: "dsh-app://shell" }), false);
+  assert.equal(at("127.0.0.1", { origin: "not a url" }), false);
+  assert.equal(at("10.0.0.7", {}), false);
+  assert.equal(at("::ffff:10.0.0.7", { origin: "http://127.0.0.1:19387" }), false);
+});
+
 test("pi-ai 由宿主提供，插件不打包自己的副本", () => {
   // DSH 的 llm-pi-ai 适配器在调用 provider 之前，先用**宿主自己的** pi-ai 归一化
   // context：system prompt 与 tools 被折进一条打头的 system 消息，信封里不再有

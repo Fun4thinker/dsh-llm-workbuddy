@@ -47,17 +47,55 @@ function json(res, status, body) {
   res.end(JSON.stringify(body));
 }
 
-function localPost(req) {
-  const address = req.socket.remoteAddress;
-  const loopback = address === "127.0.0.1" || address === "::1" || address === "::ffff:127.0.0.1";
-  if (!loopback) return false;
-  const origin = req.headers.origin;
-  if (!origin) return req.headers["sec-fetch-site"] === "same-origin";
+/** Local page authorities this plugin answers to. */
+const LOCAL_PAGE_HOSTNAMES = ["127.0.0.1", "localhost", "[::1]"];
+
+/**
+ * Whether a request's `Origin` names a page this plugin serves.
+ *
+ * Besides the loopback authorities of `dsh web`, the Desktop application serves
+ * its renderer from the privileged `dsh-app://app` origin, so a call that
+ * addresses the Host directly carries that origin too.
+ * @param origin - the request's `Origin` header.
+ * @returns true only for a local page origin.
+ */
+function localPageOrigin(origin) {
   try {
-    return ["127.0.0.1", "localhost", "[::1]"].includes(new URL(origin).hostname);
+    const parsed = new URL(origin);
+    if (parsed.protocol === "dsh-app:") return parsed.hostname === "app";
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return false;
+    return LOCAL_PAGE_HOSTNAMES.includes(parsed.hostname.toLowerCase());
   } catch {
     return false;
   }
+}
+
+/**
+ * Whether a state-changing request came from this machine's own DSH page.
+ *
+ * The peer address is the fence that matters, and it is required: a cross-site
+ * browser request reaches this loopback-only socket as 127.0.0.1 just like the
+ * real page does, so the address alone cannot separate them.
+ *
+ * The Desktop application forwards every application request to the local Host
+ * after deleting `origin` and `sec-fetch-site` (apps/desktop/src/web-document.ts),
+ * so a Desktop-originated POST arrives as a bare loopback request carrying
+ * neither header. The same-origin fallback therefore accepts an ABSENT marker
+ * rather than only `same-origin`: a browser always labels a cross-site fetch, so
+ * an unlabelled request is a local client — the Desktop forwarder, a CLI, or a
+ * script — and each of those can already reach this socket directly.
+ * @param req - the incoming request.
+ * @returns true when the request may mutate this plugin's state.
+ */
+function localPost(req) {
+  const address = req.socket?.remoteAddress;
+  const loopback = address === "127.0.0.1" || address === "::1" || address === "::ffff:127.0.0.1";
+  if (!loopback) return false;
+  const site = req.headers["sec-fetch-site"];
+  if (typeof site === "string" && site.toLowerCase() === "cross-site") return false;
+  const origin = req.headers.origin;
+  if (origin === undefined || origin === "") return true;
+  return localPageOrigin(origin);
 }
 
 async function requestBody(req) {
@@ -134,7 +172,7 @@ function validModelOverrides(models) {
   return true;
 }
 
-export const __testing = Object.freeze({ settingsAccess, setMode, validModelOverrides });
+export const __testing = Object.freeze({ settingsAccess, setMode, validModelOverrides, localPost });
 
 function maskApiKey(value) {
   const text = typeof value === "string" ? value : "";
