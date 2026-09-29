@@ -294,6 +294,24 @@ test("旧版接管 pi-ai，新版保留内置 pi-ai 供自定义 Provider 使用
   assert.equal(disabled(ctx, host("1.0.0")), false);
 });
 
+test("pi-ai 由宿主提供，插件不打包自己的副本", () => {
+  // DSH 的 llm-pi-ai 适配器在调用 provider 之前，先用**宿主自己的** pi-ai 归一化
+  // context：system prompt 与 tools 被折进一条打头的 system 消息，信封里不再有
+  // systemPrompt/tools 字段。因此 provider 必须与宿主共用同一份 pi-ai：
+  //
+  //   * 0.84.x 的 estimateMessageTokens 没有 system 分支，遇到那条消息会读
+  //     block.name.length 并抛出 "Cannot read properties of undefined
+  //     (reading 'length')"（pi-ai 捕获后以零用量 error 事件上报）；
+  //   * 即使不崩，0.84.x 也只认 context.systemPrompt / context.tools，于是
+  //     system prompt 与全部工具都会静默丢失。
+  //
+  // 把 pi-ai 声明为 peerDependency 后，DSH 的解析器会把它指向安装层的那一份
+  // （桌面端 0.2.0-rc.2 为 @earendil-works/pi-ai 0.87.1），插件与宿主始终同版本。
+  const manifest = JSON.parse(readFileSync(new URL("./package.json", import.meta.url), "utf8"));
+  assert.equal(manifest.dependencies?.["@earendil-works/pi-ai"], undefined);
+  assert.ok(manifest.peerDependencies?.["@earendil-works/pi-ai"]);
+});
+
 test("客户端兼容包装 Provider 并将 WorkBuddy 用量并入统计行", () => {
   const client = readFileSync(new URL("./client.js", import.meta.url), "utf8");
   const index = readFileSync(new URL("./index.js", import.meta.url), "utf8");
