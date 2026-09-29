@@ -1,9 +1,18 @@
+# WorkBuddy takes over DSH's built-in pi-ai provider directory only on DSH
+# 0.1.0-0.1.6, where this plugin declares every built-in provider itself and two
+# owners of the same routes would collide. From 0.1.7 onwards -- 0.2.x included
+# -- the plugin coexists with llm-pi-ai (see `modernSettings` in index.js) and
+# relies on it for the built-in catalog, so disabling it there removes every
+# provider from the "Add provider" list and unseats this plugin's own settings
+# card. The minor-version match therefore means "0.1.x", and any other version is
+# newer than 0.1.7: the `?? Infinity` fallback keeps 0.2.0-rc.2 and later out of
+# the "< 7" branch. A `?? 0` fallback would classify 0.2.0-rc.2 as 0.1.0.
 - id: llm-pi-ai
   disabled: !!js >-
     !ctx.get('profileContext')?.installAnchor ||
     Number(JSON.parse(process.getBuiltinModule('fs').readFileSync(
     ctx.get('profileContext').installAnchor, 'utf8')).version
-    .match(/^0\.1\.(\d+)/)?.[1] ?? 0) < 7
+    .match(/^0\.1\.(\d+)/)?.[1] ?? Infinity) < 7
 
 - insert:
     - id: llm-workbuddy
