@@ -1,4 +1,4 @@
-# DSH WorkBuddy Provider
+# DSH WorkBuddy Provider（Fork）
 
 为 DeepSeek Harness（DSH）增加 `WorkBuddy 中国区` Provider。插件通过
 WorkBuddy 提供的 API Key，或 WorkBuddy 中国站的网页登录令牌调用模型，并在
@@ -7,6 +7,25 @@ DSH WebUI 中管理模型和认证方式。
 > [!IMPORTANT]
 > API Key 来自 **WorkBuddy**，用于调用供 WorkBuddy 使用的模型服务。本插件是第三方
 > 适配器，不属于 WorkBuddy 或 DSH 官方项目。
+
+## 关于本 Fork
+
+本仓库是 [`@axiaohungry/dsh-llm-workbuddy`](https://github.com/Axiaohungry/dsh-llm-workbuddy)
+的 Fork，维护分支为 **`clean-fix`**（`main` 与它同步）。本分支基于上游 `1.3.19`
+（提交 `87a984b`）重新实现，并修复了插件在 DSH **`0.2.0-rc.2`** 上无法使用的问题。
+更早那次针对 DSH `0.1.7-alpha.2` 的 Fork 改动保留在归档分支
+`archive/clean-fix-1.3.18-fork.1`（`cc4923a`）中，其目标已由上游用自己的方式实现。
+
+### 相对上游 `1.3.19` 的改动
+
+| 提交 | 修复内容 |
+| --- | --- |
+| `0e80368` | **在 DSH 0.2 上保持内置 `llm-pi-ai` 启用。** `cordis.patch.yml` 的版本判断把 `0.2.0-rc.2` 误判为 `0.1.0`：正则 `^0\.1\.` 不匹配，`?? 0` 把结果兜成 minor 0，于是 `0 < 7` 成立、内置 `llm-pi-ai` 被禁用。而它是模型页整份提供商目录、模型探测与登录流程的唯一注册者——禁用后「添加提供商」列表为空，令牌登录入口也随之消失。 |
+| `63717dc` | **pi-ai 改由宿主提供**（`dependencies` → `peerDependencies`）。DSH 的适配器在调用 provider 之前，会用**它自己的** pi-ai 归一化请求：把 `systemPrompt` 与 `tools` 折进一条打头的 `system` 消息。插件自带的 pi-ai `0.84.4` 没有 `system` 分支，会把该消息当成工具调用块并在 `block.name.length` 上抛出 `Cannot read properties of undefined (reading 'length')`；即使不抛，`0.84` 也只认 `context.systemPrompt` / `context.tools`，system prompt 与全部工具会**静默丢失**。 |
+| `5a304f2` | **本机页面守卫接受桌面端转发的请求。** DSH Desktop 把页面请求转发给本地 Host 前会删除 `origin` 与 `sec-fetch-site`；旧守卫在缺少这两个头时要求 `sec-fetch-site === 'same-origin'`，于是积分与今日用量、模型配置、切换令牌账号、保存 API Key、登录等**全部 POST 接口**都返回 403「只允许从本机 DSH 页面」。 |
+
+三处修复都带回归测试，当前测试套件 38 项全部通过。第三个修复同时把
+`dsh-app://app`（桌面端渲染进程的特权来源）纳入允许范围。
 
 ## 功能
 
@@ -35,16 +54,65 @@ DSH WebUI 中管理模型和认证方式。
 （`llm/listProviders`）不兼容。`1.3.10` 起，WorkBuddy 认证助手同时兼容新旧 DSH
 的 `signal` 调用约定。升级插件后请重新安装一次并重启 DSH。
 
-插件兼容旧版 DSH 和 `0.1.7-rc.1`（`next`）的按插件条目管理配置方式。
-旧版由插件接管 `llm-pi-ai`；`next` 保留内置 `llm-pi-ai` 处理自定义提供方，
-WorkBuddy 使用自己的配置条目。升级后请完整退出并重新启动 DSH，再检查模型卡片与凭证模式。
-在 `next` 上，命令行 `login` 只保存令牌；认证模式需在 WorkBuddy 模型卡片中选择
-“令牌登录”，不会再写入旧版 `settings.yaml`。`next` 的模型页通过插件扩展位显示
-WorkBuddy 专属认证与模型管理区域；旧版 DSH 继续使用原有编辑界面。
+本 Fork 支持 DSH `>= 0.2.0-rc.1 < 0.3.0`，并保留对 `0.1.x` 的兼容。两代 DSH 的
+差别在于内置 `llm-pi-ai` 是否可用，插件据此选择两种配置方式：
+
+- **DSH `0.1.0`–`0.1.6`**（内置 `llm-pi-ai` 尚不完善）：插件接管 `llm-pi-ai`，
+  并自行声明全部内置 Provider。
+- **DSH `>= 0.1.7`，含整个 `0.2.x`**：内置 `llm-pi-ai` 保持启用，继续负责内置
+  Provider 目录、模型探测与登录流程；插件以**自己的配置条目**（`llm-workbuddy`）
+  共存，只注册 `WorkBuddy 中国区` 一条路由。
+
+升级后请完整退出并重新启动 DSH，再检查模型卡片与凭证模式。在 `0.2.x` 上，
+命令行 `login` 只保存令牌；认证模式需在 WorkBuddy 模型卡片中选择“令牌登录”。
+模型页通过插件扩展位显示 WorkBuddy 专属认证与模型管理区域。
+
+> [!IMPORTANT]
+> 插件**不再自带 `@earendil-works/pi-ai`**，而是使用 DSH 宿主提供的那一份。这一
+> 点不可改回：宿主在调用 provider 前用自身版本归一化请求上下文，两边版本不一致
+> 会导致请求报错或 system prompt 与工具定义被静默丢弃。因此插件把它声明为
+> `peerDependencies`；用 npm/pnpm 安装时会看到一条未满足 peer 的告警，属正常现象。
 
 ## 安装
 
-在 PowerShell 或终端执行：
+### 从本 Fork 安装
+
+桌面端（DSH Desktop）的 `desktop` Profile 由应用自身独占管理，命令行无法操作，
+请在应用内 **设置 → 插件** 中通过 GitHub 仓库地址安装本仓库，并选择 `clean-fix`
+分支；安装后重启应用。
+
+`web` / `headless` Profile 可以直接用命令行安装本仓库：
+
+```powershell
+dsh plugin --profile web add github:Fun4thinker/dsh-llm-workbuddy#clean-fix
+```
+
+也可以在 `~/.dsh/profiles/web/package.json` 中加入依赖后执行 `pnpm install`：
+
+```json
+{
+  "dependencies": {
+    "@axiaohungry/dsh-llm-workbuddy": "github:Fun4thinker/dsh-llm-workbuddy#clean-fix"
+  }
+}
+```
+
+安装完成后重启 DSH。`0.2.x` 上插件以 bundle 形式挂载，需要把
+`@axiaohungry/dsh-llm-workbuddy` 加入该 Profile 的 `dsh.profile.bundles` 才会启用：
+
+```json
+{
+  "dsh": {
+    "profile": {
+      "bundles": ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app", "@axiaohungry/dsh-llm-workbuddy"]
+    }
+  }
+}
+```
+
+### 安装上游发布版
+
+若不需要本 Fork 的修复，可以安装上游 npm 包：
 
 ```powershell
 npx --yes @axiaohungry/dsh-llm-workbuddy@latest install
@@ -57,21 +125,19 @@ npx --yes @axiaohungry/dsh-llm-workbuddy@latest install
 dsh plugin --profile web add @axiaohungry/dsh-llm-workbuddy@latest
 ```
 
-### 从旧版升级
-
-插件 npm 包现在是 `@axiaohungry/dsh-llm-workbuddy`。重新执行上面的安装命令时，安装器会在
-`web` 和 `headless` Profile 中自动移除旧包（包括 `dsh-llm-workbuddy` 和
-`dsh-llm-codebuddy`），再安装新包；已有 Provider、模型、
-API Key 和令牌凭据会保留。
+从更旧的包升级（`dsh-llm-workbuddy` 或 `dsh-llm-codebuddy`）：安装器会在 `web` 和
+`headless` Profile 中自动移除旧包，再安装新包；已有 Provider、模型、API Key 和令牌
+凭据会保留。
 
 新版本内部 Provider ID 为 `workbuddy-cn`。旧配置中的 `codebuddy-cn` 会在运行时兼容，并在
 切换认证模式时迁移为新 ID。
 
 ## WebUI 配置
 
-打开 **设置 → 模型**。在 `next` 中，点击“添加模型提供商”，从“第三方模型提供商”
-选择 `WorkBuddy 中国区`；已配置后直接编辑它的模型卡片。旧版 DSH 继续从提供方列表
-添加或编辑。认证区域有两个模式按钮：
+打开 **设置 → 模型**。在 DSH `0.2.x` 上，点击“添加模型提供商”，从第三方模型提供商
+选择 `WorkBuddy 中国区`；已配置后直接编辑它的模型卡片。内置 `llm-pi-ai` 提供的
+其它 Provider 会与它并列显示在同一份列表中。DSH `0.1.0`–`0.1.6` 上由插件接管
+`llm-pi-ai`，继续从提供方列表添加或编辑。认证区域有两个模式按钮：
 
 - `API Key`：只显示 API Key 来源和新增 Key 功能；
 - `令牌登录`：只显示令牌账号、登录、切换以及账号用量信息。
@@ -112,7 +178,7 @@ WORKBUDDY_API_KEY
 ```
 
 如果这个环境变量存在，API Key 来源下拉列表会显示“环境变量 WORKBUDDY_API_KEY”。
-选择它即可使用；密钥值不会显示在页面中，也不会写入 `settings.yaml`。
+选择它即可使用；密钥值不会显示在页面中，也不会写入插件配置。
 
 旧版插件使用的 `CODEBUDDY_API_KEY` 仍会作为兼容环境变量自动识别，但新配置建议统一使用
 `WORKBUDDY_API_KEY`。
@@ -164,9 +230,10 @@ DSH 保存的 Key 存放在 DSH 凭据服务中。可以保存多个 Key 并随�
 凭证可用的在线模型目录；模型仍不存在或查询失败时会明确报错。若在配置中手动指定了
 模型列表，请把要使用的模型 ID 也加入该列表。
 
-旧版 DSH 中，插件接管 `llm-pi-ai` 后也负责自定义 OpenAI Completions、OpenAI Responses
-和 Anthropic Messages 提供方的模型探测；`next` 则保留 DSH 内置的自定义提供方页面与
-探测器。两种方式都会请求已配置的模型端点；服务未提供标准目录时，可手工填写模型 ID。
+DSH `0.1.0`–`0.1.6` 中，插件接管 `llm-pi-ai` 后也负责自定义 OpenAI Completions、
+OpenAI Responses 和 Anthropic Messages 提供方的模型探测；DSH `0.1.7` 及以上（含
+`0.2.x`）保留内置的自定义提供方页面与探测器，两者都请求已配置的模型端点；服务未
+提供标准目录时，可手工填写模型 ID。
 
 ## ModLens 兼容性
 
@@ -208,19 +275,28 @@ off / minimal / low / medium / high / xhigh / max
 - 令牌请求使用 WorkBuddy 中国站的登录令牌，并在过期前自动刷新；
 - DSH 负责 Agent 循环、上下文、工具调用和权限；
 - WorkBuddy 负责模型推理并返回结果；
-- 访问令牌、刷新令牌和 DSH 保存的 API Key 不会写入模型目录或 `settings.yaml`。
+- 访问令牌、刷新令牌和 DSH 保存的 API Key 不会写入模型目录或插件配置。
 
 ## 更新
 
-重新执行安装命令即可更新：
+从本 Fork 更新时，重新执行安装命令指向 `clean-fix` 分支即可拉取最新提交：
+
+```powershell
+dsh plugin --profile web add github:Fun4thinker/dsh-llm-workbuddy#clean-fix
+```
+
+桌面端请在 **设置 → 插件** 中重新安装或更新该插件。更新后重启 DSH；已有的模型配置、
+API Key 和登录令牌会保留。
+
+上游发布版的更新方式：
 
 ```powershell
 npx --yes @axiaohungry/dsh-llm-workbuddy@latest install
 ```
 
-更新后重启 DSH。已有的模型配置、API Key 和登录令牌会保留。
-
 ## 卸载
+
+上游发布版提供卸载命令：
 
 ```powershell
 npx --yes @axiaohungry/dsh-llm-workbuddy@latest uninstall
@@ -228,6 +304,9 @@ npx --yes @axiaohungry/dsh-llm-workbuddy@latest uninstall
 
 卸载会移除 `WorkBuddy 中国区` 的 Provider 和插件包，并备份 DSH 设置文件。为方便以后
 重新安装，API Key 和登录令牌默认保留在 DSH 凭据服务中。
+
+从本 Fork 卸载时，把该包从 Profile 的 `dependencies` 与 `dsh.profile.bundles` 中移除后
+重新执行 `pnpm install`，再重启 DSH。
 
 ## 常见问题
 
@@ -238,6 +317,20 @@ npx --yes @axiaohungry/dsh-llm-workbuddy@latest uninstall
 ```powershell
 dsh plugin --profile web list --depth 0
 ```
+
+如果「添加提供商」列表整体为空、连内置 Provider 也一起消失，说明内置 `llm-pi-ai`
+被误禁用了。这是 `1.3.20` 之前 `cordis.patch.yml` 版本判断的缺陷：`0.2.0-rc.2`
+不匹配 `^0\.1\.`，`?? 0` 把结果兜成 minor 0，于是被当成 `0.1.0` 处理。更新到本仓库
+`clean-fix` 后重启即可。用下面的命令可以看到组合结果中该条目的实际状态：
+
+```powershell
+dsh --profile web --dump-config
+```
+
+### 模型列表出现但无法使用
+
+说明插件版本早于 `1.3.21`：Provider 与模型能注册，但每次请求都会失败。参见下文
+「调用模型时报 `Cannot read properties of undefined`」。
 
 ### API Key 下拉列表只有环境变量
 
@@ -265,12 +358,33 @@ dsh plugin --profile web list --depth 0
 用量栏会识别 `workbuddy` 或 `codebuddy` 词段的 Provider ID，因此通过 ModLens 等插件
 包装的 Provider（例如 `modlens-workbuddy-cn`）也可以显示当前账号用量。
 
+### 提示“只允许从本机 DSH 页面”
+
+这条提示来自插件的本机页面守卫，它保护所有会改状态的接口（积分与用量、模型配置、
+切换认证、保存或删除 API Key、登录、解绑账号）。守卫要求请求来自环回地址，并且
+不属于跨站来源。
+
+若在 DSH Desktop 中出现，说明插件版本早于 `1.3.22`：桌面端把页面请求转发给本地
+Host 时会删除 `origin` 与 `sec-fetch-site`，旧守卫在这两个头都缺失时一律拒绝，
+于是上述接口全部返回 403。请把插件更新到本仓库的 `clean-fix`（`1.3.22` 及以上）
+后重启应用。
+
+若在 `dsh web` 中出现，检查是否通过反向代理或非本机地址访问页面：守卫只接受
+`127.0.0.1`、`localhost`、`[::1]` 三种页面来源，以及在缺少来源头时的本机直连请求。
+
+### 调用模型时报 `Cannot read properties of undefined (reading 'length')`
+
+说明插件版本早于 `1.3.21`。旧版自带 pi-ai `0.84.x`，而 DSH `0.2.x` 会用宿主自己的
+pi-ai 归一化请求上下文，两者约定不一致导致该错误（即使不报错，system prompt 与工具
+定义也会被丢弃）。更新到 `1.3.21` 及以上并重启 DSH 即可；该版本改为使用宿主提供的
+pi-ai。
+
 ### 调用时报 `500 status code (no body)`
 
-先更新插件并重启 DSH：
+先更新插件并重启 DSH。从本 Fork 更新：
 
 ```powershell
-npx --yes @axiaohungry/dsh-llm-workbuddy@latest install
+dsh plugin --profile web add github:Fun4thinker/dsh-llm-workbuddy#clean-fix
 ```
 
 最新版会恢复 WorkBuddy 官方请求标识，兼容 API Key 和令牌模式。
